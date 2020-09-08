@@ -1,0 +1,127 @@
+---
+title: "JHU Practical Machine Learning: Course Project"
+output: github_document
+author: "Chris Tomlinson"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+set.seed(12345)
+```
+# Overview  
+Using devices such as Jawbone Up,Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. In this project, we use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.  
+
+### Reference:  
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.  
+  
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz6XSVlnCnr  
+
+## Task  
+To predict the "classe" variable in the training set, using any of the other variables
+
+
+# Getting Data  
+```{r getdata, cache=TRUE}
+trainURL = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testURL = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+training = read.csv(trainURL, stringsAsFactors = T)
+testing = read.csv(testURL, stringsAsFactors = T)
+```
+# Cleaning Data  
+
+```{r explore, cache=TRUE}
+library(caret)
+# Remove identifiers
+training = training[,-c(1:5)]
+testing = testing[,-c(1:5)]
+
+# Remove NAs
+colsNA = colSums(is.na(training)) == 0
+training = training[ , colsNA] # Remove NA cols
+testing = testing[ , colsNA]
+
+# Remove Near Zero Variance variables
+nZV = nearZeroVar(training) # returns vector of cols
+training = training[, -nZV]
+testing = testing[, -nZV]
+```
+  
+After an initial exploratory analysis, not shown in the interests of space, the data was cleaned in the following manner:  
+ * Identifiers removed - `r names(training[,1:5])` these variables have no value for prediction  
+ * `r sum(colSums(is.na(training)) != 0)` cols of NA values were removed which again will have no predictive value  
+ * `r length(nZV)` near-Zero Variables were removed which again will have no predictive value  
+  
+  
+# Partition Data  
+The 'testing' dataset actually represents 20 cases for the quiz, so I have renamed it to quiz to avoid confusion.
+
+The training data is then partitioned into 70% training / 30% testing to allow evaluation of out-of-sample error rates.  
+```{r partition, cache=TRUE}
+quizData = testing
+inTrain  = createDataPartition(training$classe, p=0.7, list=FALSE)
+trainData = training[inTrain, ]
+testData = training[-inTrain, ]
+dim(trainData)
+dim(testData)
+```
+
+# Models
+
+## Model 1: Classification Tree
+Classification trees, using the `rpart` method in `caret` are one of the more interpretable ML methods so I elected to use try this first.
+```{r rpart, cache=TRUE}
+modRpart = train(classe ~ ., trainData, method ="rpart")
+library(rattle)
+fancyRpartPlot(modRpart$finalModel)
+predRpart = predict(modRpart, testData)
+cmRpart = confusionMatrix(predRpart, testData$classe)
+cmRpart
+```
+
+The Classification Tree is summarised in the above `fancyRpartPlot` from the `rattle` package. Whilst very interpretable it unfortunately only has an accuracy rate of `r cmRpart$overall[1]` and thus an unacceptably high out-of-sample error rate of `r 1 - cmRpart$overall[1]`.  
+
+
+## Model 2: Random Forest  
+Random Forests are one of the most accurate model types, but computationally demanding. On my initial run it took almost 1 hour to train! I have therefore used the `doParallel` library, [following Len Greski's tutorial](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md) to enable parallel processing, which reduced the computation time to about 20 mins. I'm also using `cache=TRUE` in the chunk header to prevent having to re-train the model each time I knit the document.  
+
+I have used `traincontrol()` to specify 5-fold cross-validation.
+
+```{r rf, cache=TRUE}
+library(parallel); library(doParallel)
+cluster = makeCluster(detectCores() - 1) # leave 1 core for OS
+registerDoParallel(cluster)
+fitControl = trainControl(method = "cv",number = 5,
+                          allowParallel = TRUE)
+modRF = train(classe ~ ., trainData, method ="rf", 
+                          trcontrol=fitControl)
+stopCluster(cluster); registerDoSEQ()
+modRF$finalModel
+predRF = predict(modRF, testData)
+cmRF = confusionMatrix(predRF, testData$classe)
+cmRF
+```
+
+We can see that after so much computation the Random Forest gives an accuracy of `r cmRF$overall[1]` and thus a out-of-sample error rate of `r 1 - cmRF$overall[1]` which will be pretty hard to improve upon!  
+
+## Model 3: Gradient Boosted Model  
+Finally I will use a Gradient Boosted Model via `method="gbm"` as boosting is often very accurate, whilst being more computationally efficient than Random Forests. Given the long time computing the Random Forest took GBM might provide a better 'real-world' method.
+```{r gbm, cache=TRUE}
+cluster = makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+fitControl = trainControl(method = "repeatedcv", number = 5, repeats = 1, allowParallel = TRUE)
+modGBM  = train(classe ~ ., data=trainData, method = "gbm", trControl = fitControl, verbose = FALSE)
+stopCluster(cluster); registerDoSEQ()
+modGBM$finalModel
+predGBM = predict(modGBM, testData)
+cmGBM = confusionMatrix(predGBM, testData$classe)
+cmGBM
+```
+We can see that the GBM returns an accuracy of `r cmGBM$overall[1]` and thus a out-of-sample error rate of `r 1 - cmGBM$overall[1]`. Not quite as good as the Random Forest but still pretty excellent and about 1/20th the computational time!
+
+# Predictions for the Quiz  
+Using our best model, the Random Forest, on the quiz dataset generates the following predictions which I will submit to Coursera.
+
+```{r quiz}
+results = predict(modRF, quizData)
+results
+```
